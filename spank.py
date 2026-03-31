@@ -82,11 +82,13 @@ def play_sound_then_ultrasonic(path):
     subprocess.run(["afplay", path], capture_output=True)
     ultrasonic_active = True
     print("  ULTRASONIC ON (Ctrl+C to stop)", flush=True)
-    # 4 seconds later, layer spank2 on top of ultrasonic
+    # 4 seconds later, loop spank2 on top of ultrasonic forever
     if os.path.exists(SOUND2):
         time.sleep(4)
-        print("  SPANK 2!", flush=True)
-        subprocess.Popen(["afplay", SOUND2], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("  SPANK 2 LOOP ON", flush=True)
+        while ultrasonic_active:
+            proc = subprocess.Popen(["afplay", SOUND2], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc.wait()
 
 
 def make_callback(cooldown, sound_path, sensitivity):
