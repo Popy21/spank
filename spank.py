@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-SPANK - Plays audio when your Mac detects movement/vibration.
-Uses a low-pass filter on the microphone to isolate physical
-vibrations (taps, bumps, movement) from voices and ambient noise.
+SPANK - Plays audio when your Mac detects real movement/vibration.
+After the audio, loops an ultrasonic pain tone until Ctrl+C.
+Uses low-pass filter + adaptive baseline + dual threshold to avoid false triggers.
 """
 
 import argparse
@@ -10,6 +10,7 @@ import subprocess
 import time
 import sys
 import os
+import threading
 
 import numpy as np
 import sounddevice as sd
@@ -24,15 +25,44 @@ else:
     DEFAULT_SOUND = os.path.join(SCRIPT_DIR, "sounds", "spank.mp3")
 
 SAMPLERATE = 44100
-LOWPASS_HZ = 300  # Only keep frequencies below 300Hz (vibrations, not voice)
+LOWPASS_HZ = 300
 
-last_trigger = 0
+triggered = False
+ultrasonic_active = False
+ultrasonic_phase = 0
 baseline_rms = 0.0
-baseline_samples = 0
+baseline_max = 0.0
+calibration_count = 0
+CALIBRATION_FRAMES = 100  # ~2.3s at 1024-frame blocks
+
+
+def generate_ultrasonic_chunk(frames):
+    global ultrasonic_phase
+    t = (np.arange(frames) + ultrasonic_phase) / SAMPLERATE
+    ultrasonic_phase += frames
+
+    tone = np.zeros(frames, dtype=np.float32)
+    for f in [2800, 3200, 3500, 4000]:
+        tone += np.sin(2 * np.pi * f * t)
+    for f in [7500, 14000, 15500, 17000]:
+        tone += np.sin(2 * np.pi * f * t) * 0.8
+    tone += np.sin(2 * np.pi * 3000 * t) + np.sin(2 * np.pi * 3007 * t)
+    tone += np.sin(2 * np.pi * 15000 * t) + np.sin(2 * np.pi * 15013 * t)
+
+    peak = np.max(np.abs(tone))
+    if peak > 0:
+        tone /= peak
+    return tone.reshape(-1, 1)
+
+
+def ultrasonic_callback(outdata, frames, time_info, status):
+    if ultrasonic_active:
+        outdata[:] = generate_ultrasonic_chunk(frames)
+    else:
+        outdata[:] = 0
 
 
 def lowpass(data, cutoff, fs):
-    """Simple FFT-based low-pass filter."""
     fft = np.fft.rfft(data.flatten())
     freqs = np.fft.rfftfreq(len(data), 1.0 / fs)
     fft[freqs > cutoff] = 0
@@ -43,48 +73,64 @@ def set_volume_max():
     subprocess.run(["osascript", "-e", "set volume output volume 100"], capture_output=True)
 
 
-def play_sound(path):
+SOUND2 = os.path.join(SCRIPT_DIR, "sounds", "spank2.m4a")
+
+
+def play_sound_then_ultrasonic(path):
+    global ultrasonic_active
     set_volume_max()
-    subprocess.Popen(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["afplay", path], capture_output=True)
+    ultrasonic_active = True
+    print("  ULTRASONIC ON (Ctrl+C to stop)", flush=True)
+    # 4 seconds later, layer spank2 on top of ultrasonic
+    if os.path.exists(SOUND2):
+        time.sleep(4)
+        print("  SPANK 2!", flush=True)
+        subprocess.Popen(["afplay", SOUND2], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def make_callback(threshold, cooldown, sound_path, sensitivity):
+def make_callback(cooldown, sound_path, sensitivity):
     def callback(indata, frames, time_info, status):
-        global last_trigger, baseline_rms, baseline_samples
+        global triggered, baseline_rms, baseline_max, calibration_count
 
-        # Low-pass filter: keeps only vibration frequencies, kills voice/music
-        filtered = lowpass(indata, LOWPASS_HZ, SAMPLERATE)
-        rms = float(np.sqrt(np.mean(filtered ** 2)))
-
-        # Build baseline over first 2 seconds (~100 callbacks at 1024 frames)
-        if baseline_samples < 100:
-            baseline_rms = (baseline_rms * baseline_samples + rms) / (baseline_samples + 1)
-            baseline_samples += 1
-            if baseline_samples == 100:
-                print(f"  Baseline calibrated: {baseline_rms:.6f}", flush=True)
+        if triggered:
             return
 
-        # Trigger if current RMS is X times above baseline
-        spike = rms / max(baseline_rms, 1e-8)
+        filtered = lowpass(indata, LOWPASS_HZ, SAMPLERATE)
+        rms = float(np.sqrt(np.mean(np.array(filtered) ** 2)))
 
-        if spike > sensitivity and time.time() - last_trigger > cooldown:
-            last_trigger = time.time()
-            print(f"  SPANK! (spike: {spike:.1f}x, rms: {rms:.5f})", flush=True)
-            play_sound(sound_path)
+        # Calibration phase: record ambient noise profile
+        if calibration_count < CALIBRATION_FRAMES:
+            baseline_rms = (baseline_rms * calibration_count + rms) / (calibration_count + 1)
+            if rms > baseline_max:
+                baseline_max = rms
+            calibration_count += 1
+            if calibration_count == CALIBRATION_FRAMES:
+                print(f"  Baseline: mean={baseline_rms:.6f}, max={baseline_max:.6f}", flush=True)
+                print(f"  Trigger requires: >{baseline_max * sensitivity:.5f} (ambient_max x {sensitivity})", flush=True)
+                print(f"  Ready! Tap desk or move Mac.\n", flush=True)
+            return
 
-        # Slowly adapt baseline (ignore spikes)
-        if spike < sensitivity * 0.5:
-            baseline_rms = baseline_rms * 0.995 + rms * 0.005
+        # DUAL condition: must exceed ambient_max * sensitivity
+        # This means normal ambient fluctuations NEVER trigger
+        threshold = baseline_max * sensitivity
+        if rms > threshold:
+            triggered = True
+            spike = rms / max(baseline_rms, 1e-8)
+            print(f"  SPANK! (rms: {rms:.5f}, spike: {spike:.1f}x, threshold: {threshold:.5f})", flush=True)
+            threading.Thread(target=play_sound_then_ultrasonic, args=(sound_path,), daemon=True).start()
 
     return callback
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Play a sound when movement/vibration is detected")
+    global ultrasonic_active
+
+    parser = argparse.ArgumentParser(description="Vibration detector -> audio + ultrasonic loop")
     parser.add_argument("-s", "--sound", default=DEFAULT_SOUND, help="Path to audio file")
-    parser.add_argument("-x", "--sensitivity", type=float, default=4.0,
-                        help="Spike multiplier over baseline to trigger (default: 4.0, lower = more sensitive)")
-    parser.add_argument("-c", "--cooldown", type=float, default=2.0, help="Seconds between triggers (default: 2.0)")
+    parser.add_argument("-x", "--sensitivity", type=float, default=1.5,
+                        help="Multiplier over ambient max to trigger (default: 1.5)")
+    parser.add_argument("-c", "--cooldown", type=float, default=2.0, help="Seconds between triggers")
     parser.add_argument("--list-devices", action="store_true", help="List audio input devices")
     parser.add_argument("-d", "--device", type=int, default=None, help="Input device index")
     args = parser.parse_args()
@@ -95,27 +141,34 @@ def main():
 
     if not os.path.exists(args.sound):
         print(f"Audio file not found: {args.sound}")
-        print("Put your audio file in sounds/spank.mp3 or use -s <path>")
         sys.exit(1)
 
     print("SPANK motion detector")
     print(f"  Sound:       {args.sound}")
-    print(f"  Sensitivity: {args.sensitivity}x baseline")
-    print(f"  Cooldown:    {args.cooldown}s")
+    print(f"  Sensitivity: {args.sensitivity}x ambient max")
     print(f"  Filter:      <{LOWPASS_HZ}Hz (vibrations only)")
-    print(f"  Calibrating baseline (2s, don't move)...\n")
+    print(f"  Mode:        audio -> ultrasonic loop until Ctrl+C")
+    print(f"  Calibrating (2s, don't move)...\n")
 
-    cb = make_callback(0, args.cooldown, args.sound, args.sensitivity)
+    cb = make_callback(args.cooldown, args.sound, args.sensitivity)
 
     try:
+        out_stream = sd.OutputStream(
+            callback=ultrasonic_callback, channels=1,
+            samplerate=SAMPLERATE, dtype='float32'
+        )
+        out_stream.start()
+
         with sd.InputStream(callback=cb, channels=1, samplerate=SAMPLERATE, device=args.device):
             while True:
                 time.sleep(0.1)
     except KeyboardInterrupt:
+        ultrasonic_active = False
+        out_stream.stop()
+        out_stream.close()
         print("\nStopped.")
     except sd.PortAudioError as e:
         print(f"Audio error: {e}")
-        print("Try --list-devices and pick one with -d <index>")
         sys.exit(1)
 
 
