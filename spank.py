@@ -39,7 +39,12 @@ def lowpass(data, cutoff, fs):
     return np.fft.irfft(fft, len(data))
 
 
+def set_volume_max():
+    subprocess.run(["osascript", "-e", "set volume output volume 100"], capture_output=True)
+
+
 def play_sound(path):
+    set_volume_max()
     subprocess.Popen(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
