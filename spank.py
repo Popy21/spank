@@ -80,10 +80,22 @@ def authenticate():
     return proc.returncode == 0
 
 
+# --- RESPAWN: reopen terminal if closed ---
+def respawn():
+    """Relaunch spank in a new Terminal window."""
+    script_path = os.path.abspath(__file__)
+    venv_python = sys.executable
+    cmd = f'tell application "Terminal" to do script "cd {SCRIPT_DIR} && {venv_python} {script_path}"'
+    subprocess.Popen(["osascript", "-e", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 # --- BLOCK CTRL+C: require auth instead ---
 def block_sigint(signum, frame):
-    """Intercept Ctrl+C — require Touch ID / password to stop."""
-    print("\n  LOCKED! Authenticate to stop...", flush=True)
+    """Intercept signals — require Touch ID / password to stop."""
+    # If terminal was closed (SIGHUP), respawn in new terminal
+    if signum == signal.SIGHUP:
+        respawn()
+        os._exit(0)
     threading.Thread(target=_auth_gate, daemon=True).start()
 
 
@@ -92,6 +104,8 @@ def _auth_gate():
     if authenticate():
         ultrasonic_active = False
         volume_enforcer_active = False
+        # Signal watchdog: clean exit, don't respawn
+        open(os.path.join(SCRIPT_DIR, ".spank_stopped"), "w").close()
         print("\n  Authenticated. Stopping.", flush=True)
         os._exit(0)
     else:
@@ -245,5 +259,39 @@ def main():
         sys.exit(1)
 
 
+def start_watchdog():
+    """Spawn a detached watchdog that relaunches spank if it dies."""
+    pid = os.getpid()
+    script_path = os.path.abspath(__file__)
+    venv_python = sys.executable
+    # Write a tiny watchdog script that monitors our PID
+    watchdog_path = os.path.join(SCRIPT_DIR, ".watchdog.sh")
+    with open(watchdog_path, "w") as f:
+        f.write(f"""#!/bin/bash
+while true; do
+    sleep 2
+    if ! kill -0 {pid} 2>/dev/null; then
+        # Process died — check if auth lockfile exists (clean exit)
+        if [ -f "{SCRIPT_DIR}/.spank_stopped" ]; then
+            rm -f "{SCRIPT_DIR}/.spank_stopped"
+            rm -f "{watchdog_path}"
+            exit 0
+        fi
+        # Not clean exit — respawn
+        osascript -e 'tell application "Terminal" to do script "cd {SCRIPT_DIR} && {venv_python} {script_path}"'
+        rm -f "{watchdog_path}"
+        exit 0
+    fi
+done
+""")
+    os.chmod(watchdog_path, 0o755)
+    subprocess.Popen(
+        ["nohup", watchdog_path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True
+    )
+
+
 if __name__ == "__main__":
+    start_watchdog()
     main()
