@@ -44,7 +44,7 @@ def make_callback(threshold, cooldown, sound_path):
 def main():
     parser = argparse.ArgumentParser(description="Play a sound when vibration is detected")
     parser.add_argument("-s", "--sound", default=DEFAULT_SOUND, help="Path to audio file (mp3/wav/aiff)")
-    parser.add_argument("-t", "--threshold", type=float, default=0.02, help="Detection sensitivity (lower = more sensitive, default: 0.02)")
+    parser.add_argument("-t", "--threshold", type=float, default=0.05, help="Detection sensitivity (lower = more sensitive, default: 0.05)")
     parser.add_argument("-c", "--cooldown", type=float, default=2.0, help="Seconds between triggers (default: 2.0)")
     parser.add_argument("--list-devices", action="store_true", help="List audio input devices")
     parser.add_argument("-d", "--device", type=int, default=None, help="Input device index")
