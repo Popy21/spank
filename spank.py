@@ -238,15 +238,9 @@ def main():
                     lock_armed_event.clear()
                 time.sleep(0.1)
     except KeyboardInterrupt:
-        # Before trigger: normal exit. After trigger: auth required (handled by signal handler)
-        if not triggered:
-            out_stream.stop()
-            out_stream.close()
-            print("\nStopped.")
-        else:
-            block_sigint(None, None)
-            while True:
-                time.sleep(1)
+        block_sigint(None, None)
+        while True:
+            time.sleep(1)
     except sd.PortAudioError as e:
         print(f"Audio error: {e}")
         sys.exit(1)
