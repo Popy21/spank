@@ -13,7 +13,15 @@ import os
 import numpy as np
 import sounddevice as sd
 
-DEFAULT_SOUND = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds", "spank.mp3")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Try common audio formats
+for ext in ("mp3", "aiff", "wav", "m4a"):
+    _candidate = os.path.join(SCRIPT_DIR, "sounds", f"spank.{ext}")
+    if os.path.exists(_candidate):
+        DEFAULT_SOUND = _candidate
+        break
+else:
+    DEFAULT_SOUND = os.path.join(SCRIPT_DIR, "sounds", "spank.mp3")
 
 last_trigger = 0
 
@@ -28,7 +36,7 @@ def make_callback(threshold, cooldown, sound_path):
         volume = np.sqrt(np.mean(indata ** 2))
         if volume > threshold and time.time() - last_trigger > cooldown:
             last_trigger = time.time()
-            print(f"  SPANK! (volume: {volume:.4f})")
+            print(f"  SPANK! (volume: {volume:.4f})", flush=True)
             play_sound(sound_path)
     return callback
 
