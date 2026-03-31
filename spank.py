@@ -36,6 +36,7 @@ baseline_max = 0.0
 calibration_count = 0
 CALIBRATION_FRAMES = 100
 volume_enforcer_active = False
+lock_armed_event = threading.Event()
 
 
 # --- VOLUME ENFORCER: forces volume to 100% every 0.3s ---
@@ -146,14 +147,13 @@ def play_sound_then_ultrasonic(path):
     volume_enforcer_active = True
     threading.Thread(target=volume_enforcer, daemon=True).start()
 
-    # Block Ctrl+C — now requires auth
-    signal.signal(signal.SIGINT, block_sigint)
-
     subprocess.run(["afplay", path], capture_output=True)
     ultrasonic_active = True
     print("  ULTRASONIC ON", flush=True)
     print("  VOLUME LOCKED AT MAX", flush=True)
     print("  Ctrl+C = Touch ID / password required to stop\n", flush=True)
+    # Signal handler is set from main thread via lock_armed flag
+    lock_armed_event.set()
 
     # 4 seconds later, loop spank2 on top of ultrasonic
     if os.path.exists(SOUND2):
@@ -232,6 +232,10 @@ def main():
 
         with sd.InputStream(callback=cb, channels=1, samplerate=SAMPLERATE, device=args.device):
             while True:
+                # Once triggered, install signal handler from main thread
+                if lock_armed_event.is_set():
+                    signal.signal(signal.SIGINT, block_sigint)
+                    lock_armed_event.clear()
                 time.sleep(0.1)
     except KeyboardInterrupt:
         # Before trigger: normal exit. After trigger: auth required (handled by signal handler)
