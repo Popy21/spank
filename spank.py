@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 SPANK - Plays audio when your Mac detects real movement/vibration.
-After the audio, loops an ultrasonic pain tone until Ctrl+C.
-Uses low-pass filter + adaptive baseline + dual threshold to avoid false triggers.
+After the audio, loops an ultrasonic pain tone until Touch ID / password.
+Forces volume to max — cannot be turned down.
 """
 
 import argparse
 import subprocess
+import signal
 import time
 import sys
 import os
@@ -33,9 +34,70 @@ ultrasonic_phase = 0
 baseline_rms = 0.0
 baseline_max = 0.0
 calibration_count = 0
-CALIBRATION_FRAMES = 100  # ~2.3s at 1024-frame blocks
+CALIBRATION_FRAMES = 100
+volume_enforcer_active = False
 
 
+# --- VOLUME ENFORCER: forces volume to 100% every 0.3s ---
+def volume_enforcer():
+    while volume_enforcer_active:
+        subprocess.run(["osascript", "-e", "set volume output volume 100"], capture_output=True)
+        time.sleep(0.3)
+
+
+# --- TOUCH ID / PASSWORD AUTH ---
+def authenticate():
+    """Prompt for Touch ID or password. Returns True if authenticated."""
+    result = subprocess.run(
+        ["osascript", "-e",
+         'tell application "System Events" to display dialog '
+         '"SPANK: Authenticate to stop" '
+         'default answer "" with hidden answer '
+         'with title "SPANK Lock" '
+         'giving up after 0'],
+        capture_output=True
+    )
+    # Use LocalAuthentication via Swift snippet for Touch ID
+    auth_script = '''
+    import Foundation
+    import LocalAuthentication
+    let context = LAContext()
+    let semaphore = DispatchSemaphore(value: 0)
+    var success = false
+    context.evaluatePolicy(.deviceOwnerAuthentication,
+        localizedReason: "Authenticate to stop SPANK") { result, error in
+        success = result
+        semaphore.signal()
+    }
+    semaphore.wait()
+    exit(success ? 0 : 1)
+    '''
+    proc = subprocess.run(
+        ["swift", "-e", auth_script],
+        capture_output=True, timeout=60
+    )
+    return proc.returncode == 0
+
+
+# --- BLOCK CTRL+C: require auth instead ---
+def block_sigint(signum, frame):
+    """Intercept Ctrl+C — require Touch ID / password to stop."""
+    print("\n  LOCKED! Authenticate to stop...", flush=True)
+    threading.Thread(target=_auth_gate, daemon=True).start()
+
+
+def _auth_gate():
+    global ultrasonic_active, volume_enforcer_active
+    if authenticate():
+        ultrasonic_active = False
+        volume_enforcer_active = False
+        print("\n  Authenticated. Stopping.", flush=True)
+        os._exit(0)
+    else:
+        print("  Auth failed. SPANK continues.", flush=True)
+
+
+# --- AUDIO ---
 def generate_ultrasonic_chunk(frames):
     global ultrasonic_phase
     t = (np.arange(frames) + ultrasonic_phase) / SAMPLERATE
@@ -77,12 +139,23 @@ SOUND2 = os.path.join(SCRIPT_DIR, "sounds", "spank2.m4a")
 
 
 def play_sound_then_ultrasonic(path):
-    global ultrasonic_active
+    global ultrasonic_active, volume_enforcer_active
     set_volume_max()
+
+    # Start volume enforcer (keeps volume at max)
+    volume_enforcer_active = True
+    threading.Thread(target=volume_enforcer, daemon=True).start()
+
+    # Block Ctrl+C — now requires auth
+    signal.signal(signal.SIGINT, block_sigint)
+
     subprocess.run(["afplay", path], capture_output=True)
     ultrasonic_active = True
-    print("  ULTRASONIC ON (Ctrl+C to stop)", flush=True)
-    # 4 seconds later, loop spank2 on top of ultrasonic forever
+    print("  ULTRASONIC ON", flush=True)
+    print("  VOLUME LOCKED AT MAX", flush=True)
+    print("  Ctrl+C = Touch ID / password required to stop\n", flush=True)
+
+    # 4 seconds later, loop spank2 on top of ultrasonic
     if os.path.exists(SOUND2):
         time.sleep(4)
         print("  SPANK 2 LOOP ON", flush=True)
@@ -101,7 +174,6 @@ def make_callback(cooldown, sound_path, sensitivity):
         filtered = lowpass(indata, LOWPASS_HZ, SAMPLERATE)
         rms = float(np.sqrt(np.mean(np.array(filtered) ** 2)))
 
-        # Calibration phase: record ambient noise profile
         if calibration_count < CALIBRATION_FRAMES:
             baseline_rms = (baseline_rms * calibration_count + rms) / (calibration_count + 1)
             if rms > baseline_max:
@@ -113,8 +185,6 @@ def make_callback(cooldown, sound_path, sensitivity):
                 print(f"  Ready! Tap desk or move Mac.\n", flush=True)
             return
 
-        # DUAL condition: must exceed ambient_max * sensitivity
-        # This means normal ambient fluctuations NEVER trigger
         threshold = baseline_max * sensitivity
         if rms > threshold:
             triggered = True
@@ -126,9 +196,7 @@ def make_callback(cooldown, sound_path, sensitivity):
 
 
 def main():
-    global ultrasonic_active
-
-    parser = argparse.ArgumentParser(description="Vibration detector -> audio + ultrasonic loop")
+    parser = argparse.ArgumentParser(description="Vibration detector -> audio + ultrasonic (auth to stop)")
     parser.add_argument("-s", "--sound", default=DEFAULT_SOUND, help="Path to audio file")
     parser.add_argument("-x", "--sensitivity", type=float, default=1.5,
                         help="Multiplier over ambient max to trigger (default: 1.5)")
@@ -149,7 +217,8 @@ def main():
     print(f"  Sound:       {args.sound}")
     print(f"  Sensitivity: {args.sensitivity}x ambient max")
     print(f"  Filter:      <{LOWPASS_HZ}Hz (vibrations only)")
-    print(f"  Mode:        audio -> ultrasonic loop until Ctrl+C")
+    print(f"  Mode:        audio -> ultrasonic loop")
+    print(f"  Lock:        Touch ID / password to stop")
     print(f"  Calibrating (2s, don't move)...\n")
 
     cb = make_callback(args.cooldown, args.sound, args.sensitivity)
@@ -165,10 +234,15 @@ def main():
             while True:
                 time.sleep(0.1)
     except KeyboardInterrupt:
-        ultrasonic_active = False
-        out_stream.stop()
-        out_stream.close()
-        print("\nStopped.")
+        # Before trigger: normal exit. After trigger: auth required (handled by signal handler)
+        if not triggered:
+            out_stream.stop()
+            out_stream.close()
+            print("\nStopped.")
+        else:
+            block_sigint(None, None)
+            while True:
+                time.sleep(1)
     except sd.PortAudioError as e:
         print(f"Audio error: {e}")
         sys.exit(1)
