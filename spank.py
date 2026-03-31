@@ -223,8 +223,12 @@ def main():
 
     cb = make_callback(args.cooldown, args.sound, args.sensitivity)
 
-    # Block Ctrl+C from the start — always requires Touch ID / password
-    signal.signal(signal.SIGINT, block_sigint)
+    # Block ALL kill/close signals — always requires Touch ID / password
+    signal.signal(signal.SIGINT, block_sigint)   # Ctrl+C
+    signal.signal(signal.SIGTERM, block_sigint)  # kill / close terminal
+    signal.signal(signal.SIGHUP, block_sigint)   # terminal hangup / close window
+    signal.signal(signal.SIGQUIT, block_sigint)  # Ctrl+\
+    signal.signal(signal.SIGTSTP, block_sigint)  # Ctrl+Z
 
     try:
         out_stream = sd.OutputStream(
