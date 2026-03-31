@@ -223,6 +223,9 @@ def main():
 
     cb = make_callback(args.cooldown, args.sound, args.sensitivity)
 
+    # Block Ctrl+C from the start — always requires Touch ID / password
+    signal.signal(signal.SIGINT, block_sigint)
+
     try:
         out_stream = sd.OutputStream(
             callback=ultrasonic_callback, channels=1,
@@ -232,15 +235,7 @@ def main():
 
         with sd.InputStream(callback=cb, channels=1, samplerate=SAMPLERATE, device=args.device):
             while True:
-                # Once triggered, install signal handler from main thread
-                if lock_armed_event.is_set():
-                    signal.signal(signal.SIGINT, block_sigint)
-                    lock_armed_event.clear()
                 time.sleep(0.1)
-    except KeyboardInterrupt:
-        block_sigint(None, None)
-        while True:
-            time.sleep(1)
     except sd.PortAudioError as e:
         print(f"Audio error: {e}")
         sys.exit(1)
